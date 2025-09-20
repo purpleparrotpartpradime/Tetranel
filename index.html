@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Tetranel — visualized</title>
+<style>
+  html,body { height:100%; margin:0; background:#000; font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial; }
+  canvas { width:100%; height:100%; display:block; }
+  .overlay {
+    position: absolute; left:12px; top:12px; color: #dfefffcc;
+    background: linear-gradient(180deg, rgba(4,24,60,0.45), rgba(4,10,20,0.25));
+    border: 1px solid rgba(255,255,255,0.06); padding:10px 12px; border-radius:8px;
+    backdrop-filter: blur(6px);
+    max-width: 36ch;
+  }
+  .credits { position: absolute; right:12px; bottom:12px; color:#bcdcff88; font-size:12px; }
+  .small { font-size:13px; color:#bcdcff; }
+  .kbd { background:rgba(255,255,255,0.06); padding:2px 6px; border-radius:5px; margin-left:6px; font-weight:600; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="overlay">
+  <div style="font-weight:700; color:#dff3ff; font-size:15px">Tetranel — visualizer</div>
+  <div class="small" style="margin-top:6px">
+    Pan: <span class="kbd">drag</span>
+    &nbsp; Zoom: <span class="kbd">wheel / pinch</span>
+    &nbsp; Reset: <span class="kbd">R</span>
+  </div>
+  <div style="margin-top:8px; font-size:13px; color:#d0e8ffcc">
+    Every tile is a finite segment (max number M encoded). There are infinitely many segments stacked — zoom out forever. Zoom in is finite (clamped). As you zoom out, details subtly merge (quantized LOD).
+  </div>
+  <div style="margin-top:8px; font-size:12px; color:#bcdcff">
+    M = <code style="background:rgba(255,255,255,0.03); padding:2px 6px; border-radius:4px">5194759284829473</code>
+  </div>
+</div>
+
+<div class="credits">Generated for you — tweak shader for other aesthetics.</div>
+
+<script>
+(() => {
+  // ----- config -----
+  const MAX_ZOOM_IN = 16.0;     // finite zoom-in cap (you can increase, but it's finite)
+  const MIN_ZOOM_OUT = 1e-20;   // effectively allows infinite zoom-out (very small)
+  const M_VALUE = 5194759284829473.0; // your M (fits in JS number safely)
+
+  // ----- setup canvas / webgl -----
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl');
+  if (!gl) {
+    document.body.innerHTML = "<h2 style='color:white;padding:20px'>WebGL not available</h2>";
+    return;
+  }
+
+  // Resize helper
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
+    const w = Math.max(1, Math.floor(innerWidth * dpr));
+    const h = Math.max(1, Math.floor(innerHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      canvas.style.width = window.innerWidth + 'px';
+      canvas.style.height = window.innerHeight + 'px';
+      gl.viewport(0,0,w,h);
+    }
+  }
+  addEventListener('resize', resize, {passive:true});
+  resize();
+
+  // ----- shader sources -----
+  const vs = `
+  attribute vec2 a_pos;
+  void main() {
+    gl_Position = vec4(a_pos, 0.0, 1.0);
+  }`;
+
+  // Fragment shader: produces fractal-like tiling, encodes a finite M via modular banding.
+  // Implements LOD-like quantization when zooming out (zoom < 1.0).
+  const fs = `
+  precision highp float;
+  #define PI 3.141592653589793
+  uniform vec2 u_resolution;
+  uniform float u_time;
+  uniform vec2 u_offset; // pan offset
+  uniform float u_zoom;   // >1 zoom-in, <1 zoom-out
+  uniform float u_M;      // large integer max per-segment
+
+  // Palette: blue -> white -> black gradient controlled by factor
+  vec3 palette(float t) {
+    // t in [0,1]. Smooth blue-white-black mapping.
+    vec3 blue = vec3(0.03, 0.18, 0.45);
+    vec3 white = vec3(1.0);
+    vec3 black = vec3(0.01);
+    if (t < 0.5) {
+      return mix(blue, white, smoothstep(0.0, 0.5, t));
+    } else {
+      return mix(white, black, smoothstep(0.5, 1.0, t));
+    }
+  }
+
+  // Pseudo hash (cheap) returning smooth 0..1 value per coord
+  float hash21(vec2 p) {
+    // from iq's hashing tricks
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+  }
+
+  // A "segment value" generator that depends on integer-like tile coords and an inner fractal
+  float segmentValue(vec2 tile) {
+    // create some structured bands; use sin/cos then quantize with u_M to simulate encoding
+    float hv = hash21(tile);
+    float spiral = sin(length(tile)*0.43 + hv * 12.0 + u_time*0.02);
+    float rings = cos(tile.x*0.7) * sin(tile.y*0.67);
+    // compress into [0,1]
+    float base = 0.5 * (spiral + rings) + 0.5*hv;
+    base = fract(base * 1.2345);
+
+    // map into a "pseudo-integer" up to u_M (converted to float)
+    // we scale base by a derived factor from tile coordinates to create ordered runs
+    float seed = abs(tile.x) * 37.0 + abs(tile.y) * 53.0 + hv*1.0;
+    float pseudo = fract(sin(seed*12.9898 + base*78.233) * 43758.5453);
+    // compress pseudo via logistic for visual interest
+    pseudo = smoothstep(0.0,1.0,pseudo);
+    return pseudo;
+  }
+
+  void main() {
+    // normalized coords centered
+    vec2 uv = (gl_FragCoord.xy / u_resolution.xy) * 2.0 - 1.0;
+    uv.x *= u_resolution.x / u_resolution.y;
+
+    // world coordinate with zoom & pan
+    // zoom > 1 => zoom in; zoom < 1 => zoom out (allow arbitrarily small)
+    float zoom = clamp(u_zoom, ${1.0/MAX_ZOOM_IN}, 1e20);
+    vec2 world = (uv / zoom) + u_offset;
+
+    // LOD quantization when zooming out: compute a level that increases as we zoom out
+    // level = floor(log2(1/zoom)) roughly counts octaves of zoom-out
+    float lod = max(0.0, floor(log2(max(1.0/zoom, 1.0))));
+    // quantize scale factor; higher lod => stronger quantization
+    float quant = pow(2.0, lod); // 1,2,4,8,...
+    // subtle strength: only apply significant quant when lod > 2 to keep it unnoticeable early
+    float qstrength = smoothstep(2.0, 12.0, lod);
+
+    // Apply quantization compression: this merges nearby coordinates as we zoom out
+    if (qstrength > 0.0) {
+      // compress world coordinate into quantized buckets, but keep fractional noise to avoid harsh tiling
+      vec2 bucket = floor(world * (1.0/quant)) / (1.0/quant);
+      world = mix(world, bucket, qstrength * 0.8);
+    }
+
+    // Now tile the infinite plane into "segments". Each segment is 1.0 unit in world coords.
+    vec2 tileIndex = floor(world);
+    vec2 tileLocal = fract(world) - 0.5; // local coords in tile (-0.5..0.5)
+
+    // Create an inner fractal-ish iterative function to add detail inside each tile
+    float accum = 0.0;
+    vec2 p = tileLocal * 2.0;
+    float freq = 1.0;
+    float amp = 1.0;
+    // iterations controlled by zoom: more iterations when zoomed in
+    int iters = int(clamp(14.0 - log2(max(1.0/zoom,1.0)) , 4.0, 18.0));
+    for (int i=0;i<18;i++){
+      if(i>=iters) break;
+      // warp
+      p = vec2( abs(p.x), abs(p.y) );
+      p = p*0.9 + 0.3*vec2(sin(p.y*freq + float(i)), cos(p.x*freq + float(i)));
+      float v = sin(p.x*2.0 + p.y*1.3 + float(i)*0.5 + u_time*0.1);
+      accum += (v+1.0)*0.5 * amp;
+      freq *= 1.9;
+      amp *= 0.6;
+    }
+    accum = accum / float(iters);
+
+    // Combine with a tile-based segment value that encodes "numbers up to M"
+    float seg = segmentValue(tileIndex);
+
+    // create a banded pattern across the tile to hint at "ordered chain" segments
+    float ordering = fract( (tileIndex.x*73856093.0 + tileIndex.y*19349663.0) / (1234567.0 + seg*1000.0) );
+    float bands = smoothstep(0.0, 0.6, abs(tileLocal.x*2.0 + ordering*0.2));
+
+    // create a "progress" stripe that could represent the presence of 1..M within segments:
+    // we map seg to [0,1], then create a soft stripe
+    float stripe = smoothstep(0.0, 1.0, seg * 1.0 + 0.2 * sin((tileIndex.x+tileIndex.y)*0.15 + u_time*0.01));
+
+    // Combine all signals into a single color factor
+    float detail = accum * 0.6 + bands*0.25 + stripe*0.22;
+    // modulate by distance from tile center to create nice cell shapes
+    float dist = length(tileLocal);
+    float vign = smoothstep(0.9, 0.2, dist);
+
+    float final = clamp(detail * vign, 0.0, 1.0);
+
+    // optionally add luminous veins by thresholding a secondary signal
+    float vein = smoothstep(0.88, 0.92, accum * 1.6 + 0.2*seg);
+
+    // Combine palette
+    vec3 col = palette(final);
+    // boost veins toward white/blue
+    col += vec3(0.45,0.6,1.0) * pow(vein, 2.0) * 0.7;
+
+    // subtle border lines between tiles
+    vec2 f = fract(world);
+    float border = smoothstep(0.02, 0.0, min(f.x, f.y)) + smoothstep(0.02, 0.0, min(1.0-f.x, 1.0-f.y));
+    col = mix(col, vec3(0.02, 0.05, 0.09), border*0.5);
+
+    // final tonemapping and gamma
+    col = pow(col, vec3(0.9));
+    gl_FragColor = vec4(col, 1.0);
+  }`;
+
+  // ----- compile helpers -----
+  function cshader(type, source) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, source);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
+      throw new Error("Shader compile failed");
+    }
+    return s;
+  }
+  const prog = gl.createProgram();
+  const sV = cshader(gl.VERTEX_SHADER, vs);
+  const sF = cshader(gl.FRAGMENT_SHADER, fs);
+  gl.attachShader(prog, sV);
+  gl.attachShader(prog, sF);
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    console.error(gl.getProgramInfoLog(prog));
+    throw new Error("Program link failed");
+  }
+  gl.useProgram(prog);
+
+  // full-screen quad
+  const quadBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+    -1,-1,  1,-1,  -1,1,
+     1,-1,  1,1,   -1,1
+  ]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, 'a_pos');
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  // uniforms
+  const u_resolution = gl.getUniformLocation(prog, 'u_resolution');
+  const u_time = gl.getUniformLocation(prog, 'u_time');
+  const u_offset = gl.getUniformLocation(prog, 'u_offset');
+  const u_zoom = gl.getUniformLocation(prog, 'u_zoom');
+  const u_M = gl.getUniformLocation(prog, 'u_M');
+
+  // state
+  let offset = {x:0.0, y:0.0};
+  let zoom = 1.0;
+  let velocity = {x:0,y:0};
+  let last = {x:0,y:0, down:false};
+  let timeStart = performance.now();
+
+  // input: pan via drag
+  canvas.addEventListener('pointerdown', (ev) => {
+    canvas.setPointerCapture(ev.pointerId);
+    last.down = true;
+    last.x = ev.clientX; last.y = ev.clientY;
+  });
+  addEventListener('pointerup', (ev) => {
+    last.down = false;
+  });
+  addEventListener(
