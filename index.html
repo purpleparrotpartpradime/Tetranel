@@ -4,192 +4,169 @@
 <meta charset="utf-8" />
 <meta name="viewport" 
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Tetranel — Infinite Visualizer</title>
+<title>Tetranel — Visualizer</title>
 <style>
   html,body {
     margin:0; padding:0; height:100%; width:100%;
     overflow:hidden; background:#000;
     overscroll-behavior:none;
-    touch-action:none; /* Prevent Safari/Chrome gestures */
+    touch-action:none;
   }
-  canvas {
-    width:100%; height:100%; display:block;
-    touch-action:none; /* Disable pinch zoom/page pan */
-  }
+  canvas { width:100%; height:100%; display:block; touch-action:none; }
   .overlay {
     position:absolute; top:10px; left:10px; right:10px;
-    font-family:system-ui, sans-serif;
-    color:#dfefffcc; background:rgba(0,0,0,0.35);
-    padding:10px; border-radius:8px; font-size:13px; line-height:1.3;
+    font-family:system-ui, sans-serif; color:#dfefffcc;
+    background:rgba(0,0,0,0.35);
+    padding:10px; border-radius:8px; font-size:13px;
     pointer-events:none;
   }
-  .credits {
-    position:absolute; bottom:10px; right:10px;
-    font-family:system-ui, sans-serif;
-    color:#a9d0ff88; background:rgba(0,0,0,0.35);
-    font-size:11px; padding:4px 8px; border-radius:6px;
-    pointer-events:none;
+  .controls {
+    position:absolute; bottom:20px; left:20px;
+    display:flex; flex-direction:column; gap:8px;
   }
-  .kbd { background:rgba(255,255,255,0.1); padding:2px 5px; border-radius:4px; }
+  .btn {
+    width:48px; height:48px; border-radius:24px;
+    background:rgba(0,0,0,0.6); color:#fff;
+    font-size:24px; font-weight:bold;
+    display:flex; align-items:center; justify-content:center;
+    user-select:none; cursor:pointer;
+  }
+  .btn:active { background:rgba(255,255,255,0.2); }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-
-<div class="overlay">
-  <b>Tetranel — infinite segments</b><br>
-  <span class="kbd">Drag</span> move · <span class="kbd">Pinch</span> zoom<br>
-  <span class="kbd">Double-tap</span> reset view
+<div class="overlay">Tetranel — explore the infinite segments</div>
+<div class="controls">
+  <div class="btn" id="zoomIn">＋</div>
+  <div class="btn" id="zoomOut">－</div>
+  <div class="btn" id="reset">⟳</div>
 </div>
-<div class="credits">Mobile + Desktop WebGL fractal demo</div>
 
 <script>
 (() => {
-  const M_VALUE = 5194759284829473.0; // the "bound" number
-  const MAX_ZOOM_IN = 16.0;
+  const M_VALUE = 5194759284829473.0;
+  const MAX_ZOOM_IN = 32.0;
   const MIN_ZOOM_OUT = 1e-20;
 
   const canvas = document.getElementById("c");
-  const gl = canvas.getContext("webgl", {antialias:false});
+  const gl = canvas.getContext("webgl");
   if (!gl) { document.body.innerHTML="WebGL not supported"; return; }
 
   function resize() {
     const dpr = Math.min(window.devicePixelRatio||1, 2.5);
-    const w = Math.floor(innerWidth*dpr);
-    const h = Math.floor(innerHeight*dpr);
-    if (canvas.width!==w || canvas.height!==h) {
-      canvas.width=w; canvas.height=h;
-      gl.viewport(0,0,w,h);
-    }
+    canvas.width = innerWidth*dpr;
+    canvas.height = innerHeight*dpr;
+    gl.viewport(0,0,canvas.width,canvas.height);
   }
-  window.addEventListener("resize", resize, {passive:true});
-  resize();
+  window.addEventListener("resize", resize); resize();
 
   const vs = `attribute vec2 a_pos; void main(){gl_Position=vec4(a_pos,0.0,1.0);} `;
   const fs = `
   precision highp float;
   uniform vec2 u_resolution;
-  uniform float u_time;
   uniform vec2 u_offset;
   uniform float u_zoom;
   uniform float u_M;
 
+  // hash to pseudo-randomize segment values
+  float hash(float n){ return fract(sin(n*43758.5453)*43758.5453); }
+
   vec3 palette(float t){
-    vec3 b=vec3(0.03,0.18,0.45);
+    vec3 b=vec3(0.05,0.2,0.55);
     vec3 w=vec3(1.0);
     vec3 k=vec3(0.0);
     return (t<0.5)?mix(b,w,smoothstep(0.0,0.5,t))
                   :mix(w,k,smoothstep(0.5,1.0,t));
   }
-  float hash21(vec2 p){
-    p=fract(p*vec2(123.34,456.21));
-    p+=dot(p,p+45.32);
-    return fract(p.x*p.y);
-  }
 
   void main(){
+    // normalized coords
     vec2 uv=(gl_FragCoord.xy/u_resolution.xy)*2.0-1.0;
     uv.x*=u_resolution.x/u_resolution.y;
 
-    float zoom=u_zoom;
-    vec2 world=(uv/zoom)+u_offset;
+    // world coordinates inside Tetranel
+    vec2 world=(uv/u_zoom)+u_offset;
 
-    vec2 tile=floor(world*u_M);
-    float h=hash21(tile);
-    float v=sin(dot(tile,vec2(0.7,1.1))+u_time*0.05)+h;
-    v=fract(v*1.23);
+    // map to "segment index"
+    float idx = floor(world.x*100000.0 + world.y*1000000.0);
 
-    // Blue-white-black gradient
-    vec3 col=palette(v);
-    gl_FragColor=vec4(pow(col,vec3(0.9)),1.0);
+    // encode into number-space of Tetranel
+    float val = mod(idx, u_M);
+    float rnd = hash(val);
+
+    // compress when zooming out (infinite but smooth)
+    float t = fract(rnd + log(u_zoom+1.0)*0.1);
+
+    vec3 col=palette(t);
+    gl_FragColor=vec4(col,1.0);
   }`;
 
   function makeShader(type,src){
-    const s=gl.createShader(type);
-    gl.shaderSource(s,src); gl.compileShader(s);
-    if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))
-      throw gl.getShaderInfoLog(s);
+    const s=gl.createShader(type); gl.shaderSource(s,src);
+    gl.compileShader(s);
+    if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)) throw gl.getShaderInfoLog(s);
     return s;
   }
   const prog=gl.createProgram();
   gl.attachShader(prog,makeShader(gl.VERTEX_SHADER,vs));
   gl.attachShader(prog,makeShader(gl.FRAGMENT_SHADER,fs));
-  gl.linkProgram(prog);
-  gl.useProgram(prog);
+  gl.linkProgram(prog); gl.useProgram(prog);
 
   const buf=gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER,buf);
-  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([
-    -1,-1, 1,-1, -1,1,
-     1,-1, 1,1, -1,1
-  ]),gl.STATIC_DRAW);
-
+  gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,-1,1,1,-1,1]),gl.STATIC_DRAW);
   const loc=gl.getAttribLocation(prog,"a_pos");
-  gl.enableVertexAttribArray(loc);
-  gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc,2,gl.FLOAT,false,0,0);
 
   const uRes=gl.getUniformLocation(prog,"u_resolution");
-  const uTime=gl.getUniformLocation(prog,"u_time");
   const uOff=gl.getUniformLocation(prog,"u_offset");
   const uZoom=gl.getUniformLocation(prog,"u_zoom");
   const uM=gl.getUniformLocation(prog,"u_M");
 
   let offset={x:0,y:0}, zoom=1.0;
-  let t0=performance.now();
 
-  // Desktop: mouse controls
-  let dragging=false, lastX=0, lastY=0;
-  canvas.addEventListener("mousedown",e=>{
-    dragging=true; lastX=e.clientX; lastY=e.clientY;
-  });
+  // Controls
+  document.getElementById("zoomIn").onclick=()=>zoom=Math.min(MAX_ZOOM_IN,zoom*1.25);
+  document.getElementById("zoomOut").onclick=()=>zoom=Math.max(MIN_ZOOM_OUT,zoom/1.25);
+  document.getElementById("reset").onclick=()=>{offset={x:0,y:0}; zoom=1.0;};
+
+  // Dragging
+  let dragging=false,lastX=0,lastY=0;
+  canvas.addEventListener("mousedown",e=>{dragging=true;lastX=e.clientX;lastY=e.clientY;});
   window.addEventListener("mouseup",()=>dragging=false);
   window.addEventListener("mousemove",e=>{
     if(dragging){
-      offset.x -= (e.clientX-lastX)/canvas.height*2/zoom;
-      offset.y += (e.clientY-lastY)/canvas.height*2/zoom;
+      offset.x-=(e.clientX-lastX)/canvas.height*2/zoom;
+      offset.y+=(e.clientY-lastY)/canvas.height*2/zoom;
       lastX=e.clientX; lastY=e.clientY;
     }
   });
-  canvas.addEventListener("wheel",e=>{
-    const factor=Math.exp(-e.deltaY*0.001);
-    zoom=Math.max(MIN_ZOOM_OUT,Math.min(MAX_ZOOM_IN,zoom*factor));
-    e.preventDefault();
-  },{passive:false});
-
-  // Mobile: pinch + drag + double tap reset
+  // Pinch gestures
   let lastTouches=[];
-  let lastTap=0;
   canvas.addEventListener("touchstart",e=>{
-    if(e.touches.length===1 && e.timeStamp-lastTap<300){
-      offset={x:0,y:0}; zoom=1.0; // reset
-    }
-    lastTap=e.timeStamp;
-    lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY,id:t.identifier}));
+    lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
   },{passive:false});
-
   canvas.addEventListener("touchmove",e=>{
     if(e.touches.length===1 && lastTouches.length===1){
-      let t=e.touches[0], lt=lastTouches[0];
-      offset.x -= (t.clientX-lt.x)/canvas.height*2/zoom;
-      offset.y += (t.clientY-lt.y)/canvas.height*2/zoom;
+      let t=e.touches[0],lt=lastTouches[0];
+      offset.x-=(t.clientX-lt.x)/canvas.height*2/zoom;
+      offset.y+=(t.clientY-lt.y)/canvas.height*2/zoom;
     }
     if(e.touches.length===2 && lastTouches.length===2){
-      let [a,b]=e.touches, [la,lb]=lastTouches;
+      let [a,b]=e.touches,[la,lb]=lastTouches;
       let d0=Math.hypot(la.x-lb.x,la.y-lb.y);
       let d1=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
-      if(d0>0){
-        zoom*=d1/d0;
-        zoom=Math.max(MIN_ZOOM_OUT,Math.min(MAX_ZOOM_IN,zoom));
-      }
+      if(d0>0) zoom*=d1/d0;
+      zoom=Math.max(MIN_ZOOM_OUT,Math.min(MAX_ZOOM_IN,zoom));
     }
-    lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY,id:t.identifier}));
+    lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
     e.preventDefault();
   },{passive:false});
 
-  function draw(t){
+  function draw(){
     resize();
     gl.uniform2f(uRes,canvas.width,canvas.height);
-    gl.uniform1f(uTime,(t-t0)/1000.0);
     gl.uniform2f(uOff,offset.x,offset.y);
     gl.uniform1f(uZoom,zoom);
     gl.uniform1f(uM,M_VALUE);
