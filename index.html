@@ -4,39 +4,29 @@
 <meta charset="utf-8" />
 <meta name="viewport" 
       content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<title>Tetranel — Visualizer</title>
+<title>Tractal — Tetranel Fractal</title>
 <style>
-  html,body {
-    margin:0; padding:0; height:100%; width:100%;
-    overflow:hidden; background:#000;
-    overscroll-behavior:none;
-    touch-action:none;
-  }
+  html,body { margin:0; padding:0; height:100%; width:100%;
+    overflow:hidden; background:#000; overscroll-behavior:none; touch-action:none; }
   canvas { width:100%; height:100%; display:block; touch-action:none; }
   .overlay {
     position:absolute; top:10px; left:10px; right:10px;
-    font-family:system-ui, sans-serif; color:#dfefffcc;
-    background:rgba(0,0,0,0.35);
-    padding:10px; border-radius:8px; font-size:13px;
-    pointer-events:none;
+    font-family:system-ui,sans-serif; font-size:13px;
+    background:rgba(0,0,0,0.4); color:#fff; padding:6px 10px;
+    border-radius:8px; pointer-events:none;
   }
-  .controls {
-    position:absolute; bottom:20px; left:20px;
-    display:flex; flex-direction:column; gap:8px;
-  }
-  .btn {
-    width:48px; height:48px; border-radius:24px;
+  .controls { position:absolute; bottom:20px; left:20px;
+    display:flex; flex-direction:column; gap:8px; }
+  .btn { width:48px; height:48px; border-radius:24px;
     background:rgba(0,0,0,0.6); color:#fff;
-    font-size:24px; font-weight:bold;
-    display:flex; align-items:center; justify-content:center;
-    user-select:none; cursor:pointer;
-  }
-  .btn:active { background:rgba(255,255,255,0.2); }
+    font-size:24px; display:flex; align-items:center; justify-content:center;
+    user-select:none; cursor:pointer; }
+  .btn:active { background:rgba(255,255,255,0.25); }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
-<div class="overlay">Tetranel — explore the infinite segments</div>
+<div class="overlay">Tractal — Tetranel fractal explorer</div>
 <div class="controls">
   <div class="btn" id="zoomIn">＋</div>
   <div class="btn" id="zoomOut">－</div>
@@ -46,9 +36,6 @@
 <script>
 (() => {
   const M_VALUE = 5194759284829473.0;
-  const MAX_ZOOM_IN = 32.0;
-  const MIN_ZOOM_OUT = 1e-20;
-
   const canvas = document.getElementById("c");
   const gl = canvas.getContext("webgl");
   if (!gl) { document.body.innerHTML="WebGL not supported"; return; }
@@ -69,36 +56,40 @@
   uniform float u_zoom;
   uniform float u_M;
 
-  // hash to pseudo-randomize segment values
+  // hash from Tetranel index
   float hash(float n){ return fract(sin(n*43758.5453)*43758.5453); }
 
   vec3 palette(float t){
-    vec3 b=vec3(0.05,0.2,0.55);
+    vec3 b=vec3(0.1,0.2,0.7);
     vec3 w=vec3(1.0);
     vec3 k=vec3(0.0);
-    return (t<0.5)?mix(b,w,smoothstep(0.0,0.5,t))
-                  :mix(w,k,smoothstep(0.5,1.0,t));
+    return mix(mix(b,w,smoothstep(0.0,0.5,t)), k, smoothstep(0.5,1.0,t));
   }
 
   void main(){
-    // normalized coords
     vec2 uv=(gl_FragCoord.xy/u_resolution.xy)*2.0-1.0;
     uv.x*=u_resolution.x/u_resolution.y;
 
-    // world coordinates inside Tetranel
+    // world coordinates
     vec2 world=(uv/u_zoom)+u_offset;
 
-    // map to "segment index"
-    float idx = floor(world.x*100000.0 + world.y*1000000.0);
-
-    // encode into number-space of Tetranel
+    // Tetranel index
+    float idx = floor(world.x*10000.0 + world.y*100000.0);
     float val = mod(idx, u_M);
-    float rnd = hash(val);
+    float seed = hash(val);
 
-    // compress when zooming out (infinite but smooth)
-    float t = fract(rnd + log(u_zoom+1.0)*0.1);
+    // Iteration (Tractal recursion)
+    vec2 z = vec2(0.0);
+    vec2 c = vec2(world.x+seed*0.2, world.y+seed*0.2);
+    int maxIter = 100;
+    float i;
+    for(i=0.0;i<float(maxIter);i++){
+      z = vec2(z.x*z.x - z.y*z.y, 2.0*z.x*z.y) + c;
+      if(dot(z,z)>4.0) break;
+    }
 
-    vec3 col=palette(t);
+    float t = i/float(maxIter);
+    vec3 col = palette(t);
     gl_FragColor=vec4(col,1.0);
   }`;
 
@@ -126,10 +117,10 @@
 
   let offset={x:0,y:0}, zoom=1.0;
 
-  // Controls
-  document.getElementById("zoomIn").onclick=()=>zoom=Math.min(MAX_ZOOM_IN,zoom*1.25);
-  document.getElementById("zoomOut").onclick=()=>zoom=Math.max(MIN_ZOOM_OUT,zoom/1.25);
-  document.getElementById("reset").onclick=()=>{offset={x:0,y:0}; zoom=1.0;};
+  // Buttons
+  document.getElementById("zoomIn").onclick=()=>zoom*=1.25;
+  document.getElementById("zoomOut").onclick=()=>zoom/=1.25;
+  document.getElementById("reset").onclick=()=>{offset={x:0,y:0};zoom=1.0;};
 
   // Dragging
   let dragging=false,lastX=0,lastY=0;
@@ -142,7 +133,8 @@
       lastX=e.clientX; lastY=e.clientY;
     }
   });
-  // Pinch gestures
+
+  // Touch (drag + pinch)
   let lastTouches=[];
   canvas.addEventListener("touchstart",e=>{
     lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
@@ -158,7 +150,6 @@
       let d0=Math.hypot(la.x-lb.x,la.y-lb.y);
       let d1=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
       if(d0>0) zoom*=d1/d0;
-      zoom=Math.max(MIN_ZOOM_OUT,Math.min(MAX_ZOOM_IN,zoom));
     }
     lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
     e.preventDefault();
